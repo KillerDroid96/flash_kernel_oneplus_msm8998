@@ -1011,7 +1011,8 @@ int wma_vdev_start_resp_handler(void *handle, uint8_t *cmd_param_info,
 	if ((resp_event->vdev_id < wma->max_bssid) &&
 	    (qdf_atomic_read(
 	    &wma->interfaces[resp_event->vdev_id].vdev_restart_params.hidden_ssid_restart_in_progress))
-	    && (wma_is_vdev_in_ap_mode(wma, resp_event->vdev_id) == true)) {
+	    && (wma_is_vdev_in_ap_mode(wma, resp_event->vdev_id) == true)
+	    && (req_msg->msg_type == WMA_HIDDEN_SSID_VDEV_RESTART)) {
 		tpHalHiddenSsidVdevRestart hidden_ssid_restart =
 			(tpHalHiddenSsidVdevRestart)req_msg->user_data;
 		WMA_LOGE("%s: vdev restart event recevied for hidden ssid set using IOCTL",
@@ -5068,7 +5069,7 @@ static void wma_wait_tx_complete(tp_wma_handle wma,
 
 	while (ol_txrx_get_tx_pending(pdev) && max_wait_iterations) {
 		WMA_LOGW(FL("Waiting for outstanding packet to drain."));
-		qdf_wait_single_event(&wma->tx_queue_empty_event,
+		qdf_wait_for_event_completion(&wma->tx_queue_empty_event,
 				      WMA_TX_Q_RECHECK_TIMER_WAIT);
 		max_wait_iterations--;
 	}

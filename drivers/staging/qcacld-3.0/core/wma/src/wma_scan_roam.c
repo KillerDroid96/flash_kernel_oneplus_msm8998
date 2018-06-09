@@ -875,6 +875,8 @@ QDF_STATUS wma_roam_scan_offload_mode(tp_wma_handle wma_handle,
 		params->is_roam_req_valid = 1;
 #ifdef WLAN_FEATURE_ROAM_OFFLOAD
 		params->roam_offload_enabled = roam_req->RoamOffloadEnabled;
+		params->roam_offload_params.ho_delay_for_rx =
+				roam_req->ho_delay_for_rx;
 		params->prefer_5ghz = roam_req->Prefer5GHz;
 		params->roam_rssi_cat_gap = roam_req->RoamRssiCatGap;
 		params->select_5ghz_margin = roam_req->Select5GHzMargin;
@@ -895,6 +897,10 @@ QDF_STATUS wma_roam_scan_offload_mode(tp_wma_handle wma_handle,
 		params->fw_okc = roam_req->pmkid_modes.fw_okc;
 		params->fw_pmksa_cache = roam_req->pmkid_modes.fw_pmksa_cache;
 #endif
+		params->min_delay_btw_roam_scans =
+				roam_req->min_delay_btw_roam_scans;
+		params->roam_trigger_reason_bitmask =
+				roam_req->roam_trigger_reason_bitmask;
 		params->is_ese_assoc = roam_req->IsESEAssoc;
 		params->mdid.mdie_present = roam_req->MDID.mdiePresent;
 		params->mdid.mobility_domain = roam_req->MDID.mobilityDomain;
@@ -905,10 +911,14 @@ QDF_STATUS wma_roam_scan_offload_mode(tp_wma_handle wma_handle,
 		wma_roam_scan_fill_fils_params(wma_handle, params, roam_req);
 	}
 
-	WMA_LOGD(FL("qos_caps: %d, qos_enabled: %d, roam_scan_mode: %d"),
+	WMA_LOGD(FL("qos_caps: %d, qos_enabled: %d, ho_delay_for_rx: %d, roam_scan_mode: %d"),
 		params->roam_offload_params.qos_caps,
 		params->roam_offload_params.qos_enabled,
-		params->mode);
+		params->roam_offload_params.ho_delay_for_rx, params->mode);
+
+	WMA_LOGD(FL("min_delay_btw_roam_scans: %d, roam_trigger_reason_bitmask: %d"),
+		params->min_delay_btw_roam_scans,
+		params->roam_trigger_reason_bitmask);
 
 	status = wmi_unified_roam_scan_offload_mode_cmd(wma_handle->wmi_handle,
 				scan_cmd_fp, params);
@@ -1972,7 +1982,8 @@ QDF_STATUS wma_process_roaming_config(tp_wma_handle wma_handle,
 			/* Don't use rssi triggered roam scans if external app
 			 * is in control of channel list.
 			 */
-			if (roam_req->ChannelCacheType != CHANNEL_LIST_STATIC)
+			if (roam_req->ChannelCacheType != CHANNEL_LIST_STATIC ||
+			    roam_req->roam_force_rssi_trigger)
 				mode |= WMI_ROAM_SCAN_MODE_RSSI_CHANGE;
 
 		} else {
@@ -2239,7 +2250,8 @@ QDF_STATUS wma_process_roaming_config(tp_wma_handle wma_handle,
 			/* Don't use rssi triggered roam scans if external app
 			 * is in control of channel list.
 			 */
-			if (roam_req->ChannelCacheType != CHANNEL_LIST_STATIC)
+			if (roam_req->ChannelCacheType != CHANNEL_LIST_STATIC ||
+			    roam_req->roam_force_rssi_trigger)
 				mode |= WMI_ROAM_SCAN_MODE_RSSI_CHANGE;
 
 		} else {
@@ -2457,7 +2469,16 @@ static int wma_fill_roam_synch_buffer(tp_wma_handle wma,
 
 	fils_info = (wmi_roam_fils_synch_tlv_param *)
 			(param_buf->roam_fils_synch_info);
-	if (param_buf->roam_fils_synch_info) {
+	if (fils_info) {
+		if ((fils_info->kek_len > SIR_KEK_KEY_LEN_FILS) ||
+		    (fils_info->pmk_len > SIR_PMK_LEN)) {
+			WMA_LOGE("%s: Invalid kek_len %d or pmk_len %d",
+				 __func__,
+				 fils_info->kek_len,
+				 fils_info->pmk_len);
+			return -EINVAL;
+		}
+
 		roam_synch_ind_ptr->kek_len = fils_info->kek_len;
 		qdf_mem_copy(roam_synch_ind_ptr->kek, fils_info->kek,
 			     fils_info->kek_len);
@@ -4899,12 +4920,12 @@ int wma_extscan_change_results_event_handler(void *handle,
 	tSirWifiSignificantChange *dest_ap;
 	wmi_extscan_wlan_change_result_bssid *src_chglist;
 
-	int numap;
+	uint32_t numap;
 	int i, k;
 	uint8_t *src_rssi;
 	int count = 0;
 	int moredata;
-	int rssi_num = 0;
+	uint32_t rssi_num = 0;
 	tpAniSirGlobal pMac = cds_get_context(QDF_MODULE_ID_PE);
 	uint32_t buf_len;
 	bool excess_data = false;
@@ -4936,8 +4957,17 @@ int wma_extscan_change_results_event_handler(void *handle,
 		WMA_LOGE("%s: Invalid num of entries in page: %d", __func__, numap);
 		return -EINVAL;
 	}
-	for (i = 0; i < numap; i++)
+	for (i = 0; i < numap; i++) {
+		if (src_chglist->num_rssi_samples > (UINT_MAX - rssi_num)) {
+			WMA_LOGE("%s: Invalid num of rssi samples %d numap %d rssi_num %d",
+				 __func__, src_chglist->num_rssi_samples,
+				 numap, rssi_num);
+			return -EINVAL;
+		}
 		rssi_num += src_chglist->num_rssi_samples;
+		src_chglist++;
+	}
+	src_chglist = param_buf->bssid_signal_descriptor_list;
 
 	if (event->first_entry_index +
 	    event->num_entries_in_page < event->total_entries) {
